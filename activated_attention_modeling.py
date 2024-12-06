@@ -72,7 +72,7 @@ class ActivatedAttention(nn.Module):
         super().__init__()
         self.config = config
         self.dim = dim = config.hidden_size
-        self.in_proj = nn.Linear(dim, dim * 3)
+        self.in_proj = nn.Linear(dim, dim )
         #self.out_proj = nn.Linear(dim, dim)
         self.act = get_act_func(config.att_act)
         self.rope = RotaryEmbedding(dim)
@@ -80,6 +80,7 @@ class ActivatedAttention(nn.Module):
         self.dropout = nn.Dropout(config.dropout_prob)
 
     def _qkv(self, x):
+        print(x.shape, self.in_proj(x).shape)
         Q, K, V = (self.in_proj(x)).split((self.dim, self.dim, self.dim), -1)
         
         Q = self.rope.rotate_queries_or_keys(Q)
@@ -108,16 +109,34 @@ class ActivatedAttention(nn.Module):
         return self._out(y)
 
 
+class GLU(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dim = config.intermediate_size
+        self.in_proj = nn.Linear(config.hidden_size, config.intermediate_size * 2)
+        self.act = get_act_func(config.hidden_act)
+        self.out_proj = nn.Linear(config.intermediate_size, config.hidden_size)
+
+    def forward(self, x):
+        y, z = self.in_proj(x).split((self.dim, self.dim), -1)
+        return self.out_proj(self.act(y) * z)
+
+
 class ActivatedAttentionLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.rms = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.att = ActivatedAttention(config)
+        self.glu = GLU(config)
 
     def forward(self, x, att_mask=None):
         y = self.att(x, att_mask) + x
-        return self.layer_norm(y)
+        y = self.layer_norm(y)
+        z = y
+        #z = self.glu(y) + y
+        #z = self.layer_norm(z)
+        return z
 
 
 class ActivatedAttentionEncoder(AAPreTrainedModel):
@@ -144,6 +163,35 @@ class Pooler(nn.Module):
         return self.act(y)
 
 
+class COINPredictionHeadTransform(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.transform_act_fn = get_act_func(config.hidden_act)
+        self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+    def forward(self, X):
+        X = self.dense(X)
+        X = self.transform_act_fn(X)
+        X = self.layer_norm(X)
+        return X
+
+
+class COINLMPredictionHead(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.transform = COINPredictionHeadTransform(config)
+        self.decoder = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.bias = nn.Parameter(torch.zeros(config.vocab_size))
+        self.decoder.bias = self.bias
+        # former self.decoder.biad
+
+    def forward(self, X):
+        X = self.transform(X)
+        X = self.decoder(X)
+        return X
+
+
 class ActivatedAttentionForSequenceClassification(AAPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
@@ -153,16 +201,39 @@ class ActivatedAttentionForSequenceClassification(AAPreTrainedModel):
         )
         self.encoder = ActivatedAttentionEncoder(config)
         self.pooler = Pooler(config)
-        self.cls = nn.Linear(config.hidden_size, config.num_labels)
+        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
         self.loss_fn = nn.BCEWithLogitsLoss() if config.num_labels > 2 else nn.CrossEntropyLoss()
         self.post_init()
 
     def forward(self, input_ids, attention_mask, labels):
         emb = self.embeddings(input_ids)
         logits = self.encoder(emb)
-        out = self.cls(self.pooler(logits))
+        out = self.classifier(self.pooler(logits))
         loss = self.loss_fn(out, labels)
         return GenOutput(
             logits=out,
+            loss=loss
+        )
+
+
+class ActivatedAttentionForMaskedLM(AAPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.embeddings = nn.Sequential(
+            nn.Embedding(config.vocab_size, config.hidden_size),
+
+        )
+        self.encoder = ActivatedAttentionEncoder(config)
+        self.cls = COINLMPredictionHead(config)
+        self.loss_fn = nn.CrossEntropyLoss()
+        self.post_init()
+
+    def forward(self, input_ids, attention_mask, labels):
+        emb = self.embeddings(input_ids)
+        logits = self.encoder(emb)
+        logits = self.cls(logits)
+        loss = self.loss_fn(logits.view(-1, logits.shape[-1]), labels.view(-1))
+        return GenOutput(
+            logits=logits,
             loss=loss
         )

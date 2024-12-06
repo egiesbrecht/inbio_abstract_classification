@@ -84,14 +84,14 @@ class EpochStats(JSONEncoder):
         else:
             self.add_score("accuracy", accuracy_score(labels, y_pred))
         if self.per_class_f1:
-            self.add_score("per class f1", pc_f1(y_pred, labels, False))
+            self.add_score("per class f1", per_class_f1(y_pred, labels, False))
         self.add_score("f1_micro", f1_score(labels, y_pred, average="micro", zero_division=zd_val))
         self.add_score("f1_macro", f1_score(labels, y_pred, average="macro", zero_division=zd_val))
         self.add_score("recall_micro", recall_score(labels, y_pred, average="micro", zero_division=zd_val))
         self.add_score("recall_macro", recall_score(labels, y_pred, average="macro", zero_division=zd_val))
         self.add_score("precision_micro", precision_score(labels, y_pred, average="micro", zero_division=zd_val))
         self.add_score("precision_macro", precision_score(labels, y_pred, average="macro", zero_division=zd_val))
-
+        
 
 def flat_metrics(preds, labels, stats: EpochStats, calc_scores_by_label=False, zd_val=1):
     stats.flat_metrics(preds, labels, calc_scores_by_label, zd_val)
@@ -112,7 +112,7 @@ def print_stat_tuples(stats):
         print()
 
 
-def pc_f1(y_pred, y_true, convert_predictions=True):
+def per_class_f1(y_pred, y_true, convert_predictions=True):
     num_classes = y_true.shape[-1]
     with np.errstate(divide='ignore', invalid='ignore'):
         if convert_predictions:
